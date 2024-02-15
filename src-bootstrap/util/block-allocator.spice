@@ -1,6 +1,7 @@
 // Std imports
 import "std/data/vector";
 import "std/type/error";
+import "std/type/long";
 import "std/os/system";
 
 // Own imports
@@ -12,13 +13,13 @@ public type BlockAllocator<Base> struct {
     IMemoryManager* memoryManager
     Vector<byte*> memoryBlocks
     Vector<Base*> allocatedObjects
-    unsigned int blockSize
-    unsigned int offsetInBlock = 0
+    unsigned long blockSize
+    unsigned long offsetInBlock = 0l
 }
 
-public p BlockAllocator.ctor(IMemoryManager* memoryManager, unsigned int blockSize = 0) {
+public p BlockAllocator.ctor(IMemoryManager* memoryManager, unsigned long blockSize = 0l) {
     this.memoryManager = memoryManager;
-    this.blockSize = blockSize == 0 ? getPageSize() : blockSize;
+    this.blockSize = blockSize == 0l ? (unsigned long) getPageSize() : blockSize;
     // Allocate the first block
     this.allocateNewBlock();
 }
@@ -39,13 +40,13 @@ public p BlockAllocator.dtor() {
 
 public p BlockAllocator.allocateNewBlock() {
     // Allocate new block
-    byte* ptr = this.memoryManager.allocate(this.blockSize);
-    if ptr != nil<byte*> {
-        String msg = "Could not allocate memory block for BlockAllocator. Already allocated " + this.memoryBlocks.size() + " blocks.";
-        panic(Error(msg));
+    heap byte* ptr = this.memoryManager.allocate(this.blockSize);
+    if ptr != nil<heap byte*> {
+        String msg = "Could not allocate memory block for BlockAllocator. Already allocated " + toString(this.memoryBlocks.getSize()) + " blocks.";
+        panic(Error(msg.getRaw()));
     }
 
     // Store pointer and reset offset
-    this.memoryBlocks.push(ptr);
-    this.offsetInBlock = 0;
+    this.memoryBlocks.pushBack(ptr);
+    this.offsetInBlock = 0l;
 }

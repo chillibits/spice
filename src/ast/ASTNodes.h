@@ -1917,11 +1917,11 @@ public:
     Scope *calleeParentScope = nullptr;
 
     // Methods
-    [[nodiscard]] bool isOrdinaryCall() const { return callType == TYPE_ORDINARY; }
-    [[nodiscard]] bool isMethodCall() const { return callType == TYPE_METHOD; }
-    [[nodiscard]] bool isVirtualMethodCall() const { return isMethodCall() && thisType.isBaseType(TY_INTERFACE); }
-    [[nodiscard]] bool isCtorCall() const { return callType == TYPE_CTOR; }
-    [[nodiscard]] bool isFctPtrCall() const { return callType == TYPE_FCT_PTR; }
+    [[nodiscard]] ALWAYS_INLINE bool isOrdinaryCall() const { return callType == TYPE_ORDINARY; }
+    [[nodiscard]] ALWAYS_INLINE bool isMethodCall() const { return callType == TYPE_METHOD; }
+    [[nodiscard]] ALWAYS_INLINE bool isVirtualMethodCall() const { return isMethodCall() && thisType.isBaseType(TY_INTERFACE); }
+    [[nodiscard]] ALWAYS_INLINE bool isCtorCall() const { return callType == TYPE_CTOR; }
+    [[nodiscard]] ALWAYS_INLINE bool isFctPtrCall() const { return callType == TYPE_FCT_PTR; }
   };
 
   // Constructors

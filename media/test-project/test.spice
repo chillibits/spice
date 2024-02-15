@@ -1,29 +1,25 @@
-type ITest interface {
-    p test();
+type T int|long;
+
+type TestStruct<T> struct {
+    T _f1
+    unsigned long length
 }
 
-type InnerTest struct : ITest {
-    int a
+p TestStruct.ctor(const unsigned long initialLength) {
+    this.length = initialLength;
 }
 
-p InnerTest.ctor() {
-    this.a = 0;
+p TestStruct.printLength() {
+    printf("%d\n", this.length);
 }
 
-p InnerTest.test() {
-    printf("InnerTest.test()\n");
-}
-
-type Test struct {
-    ITest* test
-}
+type Alias alias TestStruct<long>;
 
 f<int> main() {
-    InnerTest innerTest;
-    Test test = Test{&innerTest};
-    ITest* test2 = &innerTest;
-    test2.test();
-    test.test.test();
+    Alias a = Alias{12345l, (unsigned long) 54321l};
+    a.printLength();
+    dyn b = Alias(12l);
+    b.printLength();
 }
 
 /*import "bootstrap/util/block-allocator";
@@ -32,5 +28,5 @@ import "bootstrap/util/memory";
 f<int> main() {
     DefaultMemoryManager defaultMemoryManager;
     IMemoryManager* memoryManager = &defaultMemoryManager;
-    BlockAllocator<int> allocator = BlockAllocator<int>(memoryManager, 10);
+    BlockAllocator<int> allocator = BlockAllocator<int>(memoryManager, 10l);
 }*/

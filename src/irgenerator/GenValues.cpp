@@ -56,61 +56,66 @@ std::any IRGenerator::visitFctCall(const FctCallNode *node) {
   diGenerator.setSourceLocation(node);
 
   const FctCallNode::FctCallData &data = node->data.at(manIdx);
-
   Function *spiceFunc = data.callee;
-  Scope *accessScope = data.calleeParentScope;
-  std::string mangledName;
-  if (!data.isFctPtrCall())
-    mangledName = spiceFunc->getMangledName();
+  const std::string mangledName = data.isFctPtrCall() ? "" : spiceFunc->getMangledName();
   std::vector<llvm::Value *> argValues;
 
-  // Get entry of the first fragment
-  SymbolTableEntry *firstFragEntry = currentScope->lookup(node->functionNameFragments.front());
-
-  // Get this type
+  // Traverse through field tree structure
   llvm::Value *thisPtr = nullptr;
-  if (data.isMethodCall()) {
-    assert(!data.isCtorCall());
+  llvm::Type *thisType = nullptr;
+  Scope *accessScope = currentScope;
+  SymbolType callableSType(TY_DYN);
+  if (data.isMethodCall() || data.isFctPtrCall()) {
+    for (size_t i = 0; i < node->functionNameFragments.size(); i++) {
+      const bool isFirstFragment = i == 0;
+      const bool isLastFragment = i == node->functionNameFragments.size() - 1;
 
-    // Retrieve entry of the first fragment
-    assert(firstFragEntry != nullptr && firstFragEntry->getType().getBaseType().isOneOf({TY_STRUCT, TY_INTERFACE}));
-    Scope *structScope = firstFragEntry->getType().getBaseType().getBodyScope();
-
-    // Get address of the referenced variable / struct instance
-    thisPtr = firstFragEntry->getAddress();
-
-    // Auto de-reference 'this' pointer
-    SymbolType firstFragmentType = firstFragEntry->getType();
-    autoDeReferencePtr(thisPtr, firstFragmentType, structScope->parent);
-    llvm::Type *structTy = firstFragEntry->getType().getBaseType().toLLVMType(context, structScope->parent);
-
-    // Traverse through structs - the first fragment is already looked up and the last one is the function name
-    for (size_t i = 1; i < node->functionNameFragments.size() - 1; i++) {
-      const std::string identifier = node->functionNameFragments.at(i);
       // Retrieve field entry
-      SymbolTableEntry *fieldEntry = structScope->lookupStrict(identifier);
+      const std::string &fragment = node->functionNameFragments.at(i);
+      const SymbolTableEntry *fieldEntry = accessScope->lookupStrict(fragment);
       assert(fieldEntry != nullptr);
       SymbolType fieldEntryType = fieldEntry->getType();
-      assert(fieldEntryType.getBaseType().isOneOf({TY_STRUCT, TY_INTERFACE}));
-      // Get struct type and scope
-      structScope = fieldEntryType.getBaseType().getBodyScope();
-      assert(structScope != nullptr);
-      // Get address of field
-      llvm::Value *indices[2] = {builder.getInt32(0), builder.getInt32(fieldEntry->orderIndex)};
-      thisPtr = insertInBoundsGEP(structTy, thisPtr, indices);
+      assert(fieldEntryType.getBaseType().isOneOf({TY_STRUCT, TY_INTERFACE, TY_FUNCTION, TY_PROCEDURE}));
+
+      if (isFirstFragment) {
+        // Simply set the 'this' pointer
+        thisPtr = fieldEntry->getAddress();
+      } else if (!isLastFragment) {
+        // Navigate to the field via its index and the previous pointer as base
+        llvm::Value *indices[2] = {builder.getInt32(0), builder.getInt32(fieldEntry->orderIndex)};
+        assert(thisType != nullptr);
+        thisPtr = insertInBoundsGEP(thisType, thisPtr, indices);
+      }
+
+      // Retrieve struct scope. This is only necessary for fragments 0 to n-1, because the field that is identified using
+      // the nth fragment is most definitely a function pointer.
+      if (!isLastFragment) {
+        accessScope = fieldEntryType.getBaseType().getBodyScope();
+        assert(accessScope != nullptr);
+      }
+
       // Auto de-reference pointer and get new struct type
-      autoDeReferencePtr(thisPtr, fieldEntryType, structScope->parent);
-      structTy = fieldEntryType.getBaseType().toLLVMType(context, structScope->parent);
+      autoDeReferencePtr(thisPtr, fieldEntryType, accessScope->parent);
+
+      // If we have found the address to our function pointer, we can stop here
+      if (isLastFragment) {
+        assert(data.isFctPtrCall());
+        callableSType = fieldEntryType;
+        break;
+      }
+
+      // Retrieve LLVM type
+      thisType = fieldEntryType.toLLVMType(context, accessScope->parent);
     }
+    assert(!callableSType.is(TY_DYN));
 
     // Add 'this' pointer to the front of the argument list
-    argValues.push_back(thisPtr);
+    if (data.isMethodCall())
+      argValues.push_back(thisPtr);
   }
 
   if (data.isCtorCall()) {
-    assert(!data.isMethodCall());
-
-    llvm::Type *thisType = spiceFunc->thisType.toLLVMType(context, spiceFunc->thisType.getBodyScope());
+    thisType = spiceFunc->thisType.toLLVMType(context, spiceFunc->thisType.getBodyScope());
     thisPtr = insertAlloca(thisType);
 
     // Add 'this' pointer to the front of the argument list
@@ -120,11 +125,11 @@ std::any IRGenerator::visitFctCall(const FctCallNode *node) {
   // If we have a lambda call that takes captures, add them to the argument list
   llvm::Value *fctPtr = nullptr;
   if (data.isFctPtrCall()) {
-    llvm::Value *fatPtr = firstFragEntry->getAddress();
+    llvm::Value *fatPtr = thisPtr;
     // Load fctPtr
     llvm::StructType *fatStructType = llvm::StructType::get(context, {builder.getPtrTy(), builder.getPtrTy()});
     fctPtr = insertStructGEP(fatStructType, fatPtr, 0);
-    if (firstFragEntry->getType().hasLambdaCaptures()) {
+    if (callableSType.hasLambdaCaptures()) {
       // Load captures struct
       llvm::Value *capturesPtrPtr = insertStructGEP(fatStructType, fatPtr, 1);
       llvm::Value *capturesPtr = insertLoad(builder.getPtrTy(), capturesPtrPtr, false, CAPTURES_PARAM_NAME);
@@ -138,7 +143,7 @@ std::any IRGenerator::visitFctCall(const FctCallNode *node) {
     argValues.reserve(node->argLst()->args().size());
     const std::vector<AssignExprNode *> args = node->argLst()->args();
     const std::vector<SymbolType> paramSTypes =
-        data.isFctPtrCall() ? firstFragEntry->getType().getBaseType().getFunctionParamTypes() : spiceFunc->getParamTypes();
+        data.isFctPtrCall() ? callableSType.getFunctionParamTypes() : spiceFunc->getParamTypes();
     assert(paramSTypes.size() == args.size());
     for (size_t i = 0; i < args.size(); i++) {
       AssignExprNode *argNode = args.at(i);
@@ -167,9 +172,9 @@ std::any IRGenerator::visitFctCall(const FctCallNode *node) {
   SymbolType returnSType(TY_DYN);
   std::vector<SymbolType> paramSTypes;
   if (data.isFctPtrCall()) {
-    if (firstFragEntry->getType().isBaseType(TY_FUNCTION))
-      returnSType = firstFragEntry->getType().getBaseType().getFunctionReturnType();
-    paramSTypes = firstFragEntry->getType().getBaseType().getFunctionParamTypes();
+    if (callableSType.is(TY_FUNCTION))
+      returnSType = callableSType.getFunctionReturnType();
+    paramSTypes = callableSType.getFunctionParamTypes();
   } else {
     returnSType = spiceFunc->returnType;
     paramSTypes = spiceFunc->getParamTypes();
@@ -181,15 +186,13 @@ std::any IRGenerator::visitFctCall(const FctCallNode *node) {
     fctType = fct->getFunctionType();
   } else {
     // Get returnType
-    llvm::Type *returnType = builder.getVoidTy();
-    if (!returnSType.is(TY_DYN))
-      returnType = returnSType.toLLVMType(context, accessScope);
+    llvm::Type *returnType = returnSType.is(TY_DYN) ? builder.getVoidTy() : returnSType.toLLVMType(context, accessScope);
 
     // Get arg types
     std::vector<llvm::Type *> argTypes;
     if (data.isMethodCall() || data.isCtorCall())
       argTypes.push_back(builder.getPtrTy()); // This pointer
-    if (data.isFctPtrCall() && firstFragEntry->getType().hasLambdaCaptures())
+    if (data.isFctPtrCall() && callableSType.hasLambdaCaptures())
       argTypes.push_back(builder.getPtrTy()); // Capture pointer
     for (const SymbolType &paramType : paramSTypes)
       argTypes.push_back(paramType.toLLVMType(context, accessScope));
@@ -214,11 +217,7 @@ std::any IRGenerator::visitFctCall(const FctCallNode *node) {
     // Generate function call
     result = builder.CreateCall({fctType, fct}, argValues);
   } else if (data.isFctPtrCall()) {
-    assert(firstFragEntry != nullptr);
-    SymbolType firstFragType = firstFragEntry->getType();
-    if (!fctPtr)
-      fctPtr = firstFragEntry->getAddress();
-    autoDeReferencePtr(fctPtr, firstFragType, currentScope);
+    assert(fctPtr != nullptr);
     llvm::Value *fct = insertLoad(builder.getPtrTy(), fctPtr, false, "fct");
 
     // Generate function call
@@ -260,7 +259,7 @@ std::any IRGenerator::visitFctCall(const FctCallNode *node) {
   if (data.isCtorCall())
     return LLVMExprResult{.ptr = thisPtr, .refPtr = resultPtr, .entry = anonymousSymbol};
 
-  // In case this is a callee, returning a reference, return the address
+  // In case this is a callee which returns a reference, return the address
   if (returnSType.isRef())
     return LLVMExprResult{.ptr = result, .refPtr = resultPtr, .entry = anonymousSymbol};
 

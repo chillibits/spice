@@ -1609,53 +1609,89 @@ std::any TypeChecker::visitFctCall(FctCallNode *node) {
     }
   }
 
-  // Retrieve entry of the first fragment
-  const std::string &firstFrag = node->functionNameFragments.front();
-  SymbolTableEntry *firstFragEntry = currentScope->lookup(firstFrag);
-  if (firstFragEntry) {
-    // Check if we have seen a 'this.' prefix, because the generator needs that
-    if (firstFragEntry->scope->type == ScopeType::STRUCT && firstFrag != THIS_VARIABLE_NAME)
-      SOFT_ERROR_ER(node, REFERENCED_UNDEFINED_VARIABLE,
-                    "The symbol '" + firstFrag + "' could not be found. Missing 'this.' prefix?")
+  // Traverse through field tree structure
+  Scope *accessScope = currentScope;
+  SymbolTableEntry *callableEntry = nullptr;
+  SymbolType callableType(TY_PROCEDURE);
+  for (size_t i = 0; i < node->functionNameFragments.size(); i++) {
+    const bool isFirstFragment = i == 0;
+    const bool isLastFragment = i == node->functionNameFragments.size() - 1;
+    // Retrieve field entry
+    const std::string &fragment = node->functionNameFragments.at(i);
+    SymbolTableEntry *fieldEntry = accessScope->lookupStrict(fragment);
+    // Check if field was found
+    if (!fieldEntry) {
+      // Here it is acceptable that we do not find the entry, since normal functions/procedures are not only identified by name.
+      if (isLastFragment)
+        break;
 
-    firstFragEntry->used = true;
-    // Decide of which type the function call is
-    const SymbolType &baseType = firstFragEntry->getType().getBaseType();
-    HANDLE_UNRESOLVED_TYPE_ER(baseType)
-    if (baseType.isOneOf({TY_STRUCT, TY_INTERFACE})) {
-      data.callType = firstFragEntry->scope->type == ScopeType::GLOBAL ? FctCallNode::TYPE_CTOR : FctCallNode::TYPE_METHOD;
-    } else if (baseType.isOneOf({TY_FUNCTION, TY_PROCEDURE}) && firstFragEntry->scope->type != ScopeType::GLOBAL) {
-      data.callType = FctCallNode::TYPE_FCT_PTR;
+      const std::string thisTypeName = data.thisType.getBaseType().getName();
+      const std::string errorMsg = "The type " + thisTypeName + " does not have a member with the name '" + fragment + "'";
+      SOFT_ERROR_ER(node, ACCESS_TO_NON_EXISTING_MEMBER, errorMsg)
     }
+    // Check if we have seen a 'this.' prefix, because the generator needs that
+    if (isFirstFragment && fieldEntry->scope->type == ScopeType::STRUCT && fragment != THIS_VARIABLE_NAME) {
+      const std::string errorMsg = "The symbol '" + fragment + "' could not be found. Missing 'this.' prefix?";
+      SOFT_ERROR_ER(node, REFERENCED_UNDEFINED_VARIABLE, errorMsg)
+    }
+    // If this is the last fragment, cancel here
+    if (isLastFragment) {
+      callableEntry = fieldEntry;
+      callableType = fieldEntry->getType().getBaseType();
+      break;
+    }
+    // Check if we are calling on an invalid type
+    if (!fieldEntry->getType().getBaseType().isOneOf({TY_STRUCT, TY_INTERFACE})) {
+      const std::string errorMsg = "Cannot call a method on '" + fragment + "', since it is not of type struct or interface";
+      SOFT_ERROR_ER(node, INVALID_MEMBER_ACCESS, errorMsg)
+    }
+    fieldEntry->used = true;
+
+    // Get struct type and scope
+    data.thisType = fieldEntry->getType();
+    accessScope = data.thisType.getBaseType().getBodyScope();
+    assert(accessScope != nullptr);
+  }
+
+  // Decide, which type of function call we have
+  const SymbolType thisBaseType = data.thisType.getBaseType();
+  if (callableType.is(TY_STRUCT)) {
+    data.callType = FctCallNode::TYPE_CTOR;
+  } else if (callableType.isOneOf({TY_FUNCTION, TY_PROCEDURE})) {
+    if (thisBaseType.isOneOf({TY_STRUCT, TY_INTERFACE})) {
+      const bool isField = callableEntry && callableEntry->orderIndex < thisBaseType.getBodyScope()->getFieldCount();
+      data.callType = isField ? FctCallNode::TYPE_FCT_PTR : FctCallNode::TYPE_METHOD;
+    } else {
+      data.callType = accessScope->type == ScopeType::GLOBAL ? FctCallNode::TYPE_ORDINARY : FctCallNode::TYPE_FCT_PTR;
+    }
+  } else {
+    SOFT_ERROR_ER(node, REFERENCED_UNDEFINED_FUNCTION, "Cannot perform call on a non-struct, non-interface and non-function type")
   }
 
   // Get struct name. Retrieve it from alias if required
   std::string fqFunctionName = node->fqFunctionName;
-  SymbolTableEntry *aliasEntry = rootScope->lookupStrict(fqFunctionName);
-  SymbolTableEntry *aliasedTypeContainerEntry = nullptr;
-  const bool isAliasType = aliasEntry && aliasEntry->getType().is(TY_ALIAS);
-  if (isAliasType) {
-    aliasedTypeContainerEntry = rootScope->lookupStrict(aliasEntry->name + ALIAS_CONTAINER_SUFFIX);
-    assert(aliasedTypeContainerEntry != nullptr);
-    // Set alias entry used
-    aliasEntry->used = true;
-    fqFunctionName = aliasedTypeContainerEntry->getType().getSubType();
-  }
-
-  // Get the concrete template types
   std::vector<SymbolType> concreteTemplateTypes;
-  if (isAliasType) {
-    // Retrieve concrete template types from type alias
-    concreteTemplateTypes = aliasedTypeContainerEntry->getType().getTemplateTypes();
-    // Check if the aliased type specified template types and the struct instantiation does
-    if (!concreteTemplateTypes.empty() && node->hasTemplateTypes)
-      SOFT_ERROR_BOOL(node->templateTypeLst(), ALIAS_WITH_TEMPLATE_LIST, "The aliased type already has a template list")
+  if (data.isCtorCall()) {
+    SymbolTableEntry *aliasEntry = rootScope->lookupStrict(fqFunctionName);
+    if (aliasEntry && aliasEntry->getType().is(TY_ALIAS)) {
+      SymbolTableEntry *aliasedTypeContainerEntry = rootScope->lookupStrict(aliasEntry->name + ALIAS_CONTAINER_SUFFIX);
+      assert(aliasedTypeContainerEntry != nullptr);
+      // Set alias entry used
+      aliasEntry->used = true;
+      // Overwrite function name with aliased type name
+      fqFunctionName = aliasedTypeContainerEntry->getType().getSubType();
+      // Retrieve concrete template types from type alias
+      concreteTemplateTypes = aliasedTypeContainerEntry->getType().getTemplateTypes();
+    }
   }
 
-  // Get concrete template types
+  // Retrieve template types
   if (node->hasTemplateTypes) {
+    // Discard concrete template types that were potentially retrieved from the alias
+    concreteTemplateTypes.clear();
+
     for (DataTypeNode *templateTypeNode : node->templateTypeLst()->dataTypes()) {
-      auto templateType = std::any_cast<SymbolType>(visit(templateTypeNode));
+      const auto templateType = std::any_cast<SymbolType>(visit(templateTypeNode));
       assert(!templateType.isOneOf({TY_DYN, TY_INVALID}));
 
       // Abort if the type is unresolved
@@ -1670,35 +1706,29 @@ std::any TypeChecker::visitFctCall(FctCallNode *node) {
     }
   }
 
-  // Check if this is a method call or a normal function call
+  // Decide what to do next, based on the call type
   if (data.isMethodCall()) {
     // This is a method call
-    data.thisType = firstFragEntry->getType();
     Scope *structBodyScope = data.thisType.getBaseType().getBodyScope();
     assert(structBodyScope != nullptr);
-    bool success = visitMethodCall(node, structBodyScope, concreteTemplateTypes);
+    const bool success = visitMethodCall(node, structBodyScope, concreteTemplateTypes);
     if (!success) // Check if soft errors occurred
       return ExprResult{node->setEvaluatedSymbolType(SymbolType(TY_UNRESOLVED), manIdx)};
     assert(data.calleeParentScope != nullptr);
   } else if (data.isFctPtrCall()) {
     // This is a function pointer call
-    const SymbolType &functionType = firstFragEntry->getType().getBaseType();
-    assert(functionType.isOneOf({TY_FUNCTION, TY_PROCEDURE}));
-    bool success = visitFctPtrCall(node, functionType);
+    assert(callableType.isOneOf({TY_FUNCTION, TY_PROCEDURE}));
+    const bool success = visitFctPtrCall(node, callableType);
     if (!success) // Check if soft errors occurred
       return ExprResult{node->setEvaluatedSymbolType(SymbolType(TY_UNRESOLVED), manIdx)};
   } else {
     // This is an ordinary function call
     assert(data.isOrdinaryCall() || data.isCtorCall());
-    bool success = visitOrdinaryFctCall(node, concreteTemplateTypes, fqFunctionName);
+    assert(!data.isCtorCall() || callableType.is(TY_STRUCT));
+    const bool success = visitOrdinaryFctCall(node, concreteTemplateTypes, fqFunctionName);
     if (!success) // Check if soft errors occurred
       return ExprResult{node->setEvaluatedSymbolType(SymbolType(TY_UNRESOLVED), manIdx)};
     assert(data.calleeParentScope != nullptr);
-
-    // Only ordinary function calls can be constructors
-    if (data.isCtorCall()) {
-      assert(data.thisType.is(TY_STRUCT));
-    }
   }
 
   if (!data.isFctPtrCall()) {
@@ -1729,10 +1759,10 @@ std::any TypeChecker::visitFctCall(FctCallNode *node) {
   }
 
   // Retrieve return type
-  const bool isFct = data.isFctPtrCall() ? firstFragEntry->getType().getBaseType().is(TY_FUNCTION) : data.callee->isFunction();
+  const bool isFct = data.isFctPtrCall() ? thisBaseType.is(TY_FUNCTION) : data.callee->isFunction();
   SymbolType returnType;
   if (data.isFctPtrCall()) {
-    returnType = isFct ? firstFragEntry->getType().getBaseType().getFunctionReturnType() : SymbolType(TY_BOOL);
+    returnType = isFct ? thisBaseType.getFunctionReturnType() : SymbolType(TY_BOOL);
   } else if (data.isCtorCall()) {
     // Set return type to 'this' type
     returnType = data.thisType;
@@ -1754,7 +1784,6 @@ std::any TypeChecker::visitFctCall(FctCallNode *node) {
     assert(spiceStruct != nullptr);
     returnBaseType.setBodyScope(spiceStruct->scope);
     returnType = returnType.replaceBaseType(returnBaseType);
-
     returnType = mapImportedScopeTypeToLocalType(returnType.getBaseType().getBodyScope(), returnType);
 
     // Add anonymous symbol to keep track of deallocation
@@ -1776,7 +1805,7 @@ bool TypeChecker::visitOrdinaryFctCall(FctCallNode *node, const std::vector<Symb
                                        const std::string &fqFunctionName) {
   FctCallNode::FctCallData &data = node->data.at(manIdx);
 
-  // Check if this is a ctor call to the String type
+  // Check if this is a ctor call to a builtin type
   if (node->functionNameFragments.size() == 1) {
     for (const auto &[typeName, runtimeModule] : TYPE_NAME_TO_RT_MODULE_MAPPING)
       if (fqFunctionName == typeName && !sourceFile->isRT(runtimeModule))
@@ -1871,27 +1900,6 @@ bool TypeChecker::visitFctPtrCall(FctCallNode *node, const SymbolType &functionT
 
 bool TypeChecker::visitMethodCall(FctCallNode *node, Scope *structScope, const std::vector<SymbolType> &templateTypes) const {
   FctCallNode::FctCallData &data = node->data.at(manIdx);
-
-  // Traverse through structs - the first fragment is already looked up and the last one is the method name
-  for (size_t i = 1; i < node->functionNameFragments.size() - 1; i++) {
-    const std::string &identifier = node->functionNameFragments.at(i);
-
-    // Retrieve field entry
-    SymbolTableEntry *fieldEntry = structScope->lookupStrict(identifier);
-    if (!fieldEntry)
-      SOFT_ERROR_BOOL(node, ACCESS_TO_NON_EXISTING_MEMBER,
-                      "The type " + data.thisType.getBaseType().getName() + " does not have a member with the name '" +
-                          identifier + "'")
-    if (!fieldEntry->getType().getBaseType().isOneOf({TY_STRUCT, TY_INTERFACE}))
-      SOFT_ERROR_BOOL(node, INVALID_MEMBER_ACCESS,
-                      "Cannot call a method on '" + identifier + "', since it is no struct or interface")
-    fieldEntry->used = true;
-
-    // Get struct type and scope
-    data.thisType = fieldEntry->getType();
-    structScope = data.thisType.getBaseType().getBodyScope();
-    assert(structScope != nullptr);
-  }
 
   if (data.thisType.is(TY_INTERFACE))
     SOFT_ERROR_BOOL(node, INVALID_MEMBER_ACCESS, "Cannot call a method on an interface")
