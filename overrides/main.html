@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block announce %}
+<style>
+  @keyframes pulse {
+    0%, 40%, 80%, 100% {
+      transform: scale(1);
+    }
+    20%, 60% {
+      transform: scale(0.9);
+    }
+  }
+
+  .x {
+    color: #fff;
+    animation: pulse 1000ms infinite;
+  }
+
+  .x-link {
+    color: white !important;
+  }
+</style>
+<a href="https://x.com/chillibits" target="_blank" class="x-link">
+  For updates follow <strong>@chillibits</strong> on <span class="twemoji x"> {% include ".icons/fontawesome/brands/x-twitter.svg" %} </span>
+</a>
+{% endblock %}
+
+{% block extrahead %}
+{% set title = config.site_name %}
+{% if page and page.title and not page.is_homepage %}
+{% set title = config.site_name ~ " - " ~ page.title | striptags %}
+{% endif %}
+{% set image = config.site_url ~ 'static/card.png' %}
+<meta property="og:type" content="website">
+<meta property="og:title" content="{{ title }}">
+<meta property="og:description" content="{{ config.site_description }}">
+<meta property="og:url" content="{{ page.canonical_url }}">
+<meta property="og:image" content="{{ image }}">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="x:card" content="summary_large_image">
+<meta name="x:site" content="@chillibits">
+<meta name="x:creator" content="@chillibits">
+<meta name="x:title" content="{{ title }}">
+<meta name="x:description" content="{{ config.site_description }}">
+<meta name="x:image" content="{{ image }}">
+<meta name="theme-color" content="#829FAF">
+{% endblock %}
